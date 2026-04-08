@@ -59,7 +59,7 @@
   (list ax ay)
 )
 
-(defun svgo-ocs-to-wcs (pt norm elev / axes ax ay)
+(defun svgo-ocs-to-wcs (pt norm elev / axes ax ay nrm ox oy oz)
   ;; Transform a 2D OCS point (x y) + elevation to WCS 3D point.
   ;; pt   = (x y) or (x y z) — only x,y used; z ignored (elevation handles Z)
   ;; norm = entity extrusion normal (group 210), default (0 0 1)
@@ -214,7 +214,7 @@
   )
 )
 
-(defun svgo-entity-colour-hex (ename ignore-colour / edata clr tc r g b rgb lyr-name)
+(defun svgo-entity-colour-hex (ename ignore-colour / edata clr tc r g b lyr-name)
   ;; Get entity stroke colour as "#RRGGBB" string (pure DXF — no VLA).
   ;; Group 420 = true colour packed as 24-bit integer (R*65536 + G*256 + B).
   ;; Group 62  = ACI colour index (0=ByBlock, 256=ByLayer, 1-255=explicit).
@@ -396,41 +396,13 @@
   pts
 )
 
-(defun svgo-sample-curve (ename n-seg / total-len step-dist ii wpt pts)
-  ;; Sample n-seg+1 WCS 3D points along a vlax-curve entity (SPLINE, HELIX).
-  ;; Returns point list or nil on failure.
-  (setq total-len
-    (vl-catch-all-apply 'vlax-curve-getDistAtParam
-      (list ename
-        (vl-catch-all-apply 'vlax-curve-getEndParam (list ename)))))
-  (if (vl-catch-all-error-p total-len) (setq total-len nil))
-  (if (and total-len (not (vl-catch-all-error-p total-len)) (> total-len 0.0))
-    (progn
-      (setq step-dist (/ total-len (float n-seg)))
-      (setq pts '())
-      (setq ii 0)
-      (while (<= ii n-seg)
-        (setq wpt
-          (vl-catch-all-apply 'vlax-curve-getPointAtDist
-            (list ename (* ii step-dist))))
-        (if (and wpt (not (vl-catch-all-error-p wpt)))
-          (setq pts (append pts (list wpt)))
-        )
-        (setq ii (1+ ii))
-      )
-      pts
-    )
-    nil
-  )
-)
-
 (defun svgo-entity-to-svg (ename vmat svg-w svg-h prec stroke-w ignore-col auto-fill
                            / etype edata col-hex fill-val svg-str
-                             pt1 pt2 pts proj-pts closed
+                             pt1 pt2 pts proj-pts
                              cx cy r sa ea norm elev
-                             vertex-e vdata p3 p4
                              ex ey major-vec ratio full-ellipse
-                             marker-r dir-vec t-lo t-hi tx ty)
+                             marker-r total-len step-dist ii wpt
+                             dir-vec vbx-lo vby-lo vbx-hi vby-hi t-lo t-hi tx ty)
   ;; Dispatch on entity type and return an SVG element string (or nil if unsupported).
   (setq edata (entget ename))
   (setq etype (cdr (assoc 0 edata)))
@@ -633,17 +605,46 @@
 
     ;; --- SPLINE ---
     ((= etype "SPLINE")
-     (setq pts (svgo-sample-curve ename 64))
-     (if pts
+     ;; Sample along spline curve using vlax-curve-* COM functions.
+     ;; Returns WCS 3D points — project as open polyline.
+     (vl-load-com)
+     (setq total-len
+       (vl-catch-all-apply 'vlax-curve-getDistAtParam
+         (list ename
+           (vl-catch-all-apply 'vlax-curve-getEndParam (list ename)))))
+     ;; getEndParam may itself return an error object — treat that as failure
+     (if (vl-catch-all-error-p total-len) (setq total-len nil))
+     (if (and total-len (not (vl-catch-all-error-p total-len)) (> total-len 0.0))
        (progn
-         (setq proj-pts (svgo-project-list pts vmat svg-w svg-h))
-         (setq svg-str
-           (strcat "    <polyline"
-             " points=\"" (svgo-pts-to-str proj-pts prec) "\""
-             " stroke=\"" col-hex "\""
-             " stroke-width=\"" (rtos stroke-w 2 2) "\""
-             " fill=\"none\"/>")))
-       (princ "\n[SVGOUT2] Warning: could not sample SPLINE — skipping.")
+         (setq step-dist (/ total-len 64.0))
+         (setq pts '())
+         (setq ii 0)
+         (while (<= ii 64)
+           (setq wpt
+             (vl-catch-all-apply 'vlax-curve-getPointAtDist
+               (list ename (* ii step-dist))))
+           (if (and wpt (not (vl-catch-all-error-p wpt)))
+             (setq pts (append pts (list wpt)))
+           )
+           (setq ii (1+ ii))
+         )
+         (if pts
+           (progn
+             (setq proj-pts (svgo-project-list pts vmat svg-w svg-h))
+             (setq svg-str
+               (strcat "    <polyline"
+                 " points=\"" (svgo-pts-to-str proj-pts prec) "\""
+                 " stroke=\"" col-hex "\""
+                 " stroke-width=\"" (rtos stroke-w 2 2) "\""
+                 " fill=\"none\"/>"))
+           )
+           (setq svg-str nil)
+         )
+       )
+       (progn
+         (princ "\n[SVGOUT2] Warning: could not sample SPLINE — skipping.")
+         (setq svg-str nil)
+       )
      )
     )
 
@@ -680,17 +681,44 @@
 
     ;; --- HELIX ---
     ((= etype "HELIX")
-     (setq pts (svgo-sample-curve ename 64))
-     (if pts
+     ;; Sample along helix curve using vlax-curve-* — same pattern as SPLINE.
+     (vl-load-com)
+     (setq total-len
+       (vl-catch-all-apply 'vlax-curve-getDistAtParam
+         (list ename
+           (vl-catch-all-apply 'vlax-curve-getEndParam (list ename)))))
+     (if (vl-catch-all-error-p total-len) (setq total-len nil))
+     (if (and total-len (not (vl-catch-all-error-p total-len)) (> total-len 0.0))
        (progn
-         (setq proj-pts (svgo-project-list pts vmat svg-w svg-h))
-         (setq svg-str
-           (strcat "    <polyline"
-             " points=\"" (svgo-pts-to-str proj-pts prec) "\""
-             " stroke=\"" col-hex "\""
-             " stroke-width=\"" (rtos stroke-w 2 2) "\""
-             " fill=\"none\"/>")))
-       (princ "\n[SVGOUT2] Warning: could not sample HELIX — skipping.")
+         (setq step-dist (/ total-len 64.0))
+         (setq pts '())
+         (setq ii 0)
+         (while (<= ii 64)
+           (setq wpt
+             (vl-catch-all-apply 'vlax-curve-getPointAtDist
+               (list ename (* ii step-dist))))
+           (if (and wpt (not (vl-catch-all-error-p wpt)))
+             (setq pts (append pts (list wpt)))
+           )
+           (setq ii (1+ ii))
+         )
+         (if pts
+           (progn
+             (setq proj-pts (svgo-project-list pts vmat svg-w svg-h))
+             (setq svg-str
+               (strcat "    <polyline"
+                 " points=\"" (svgo-pts-to-str proj-pts prec) "\""
+                 " stroke=\"" col-hex "\""
+                 " stroke-width=\"" (rtos stroke-w 2 2) "\""
+                 " fill=\"none\"/>"))
+           )
+           (setq svg-str nil)
+         )
+       )
+       (progn
+         (princ "\n[SVGOUT2] Warning: could not sample HELIX — skipping.")
+         (setq svg-str nil)
+       )
      )
     )
 
@@ -734,6 +762,15 @@
   (cdr (assoc 8 (entget ename)))
 )
 
+(defun svgo-member-str (str lst)
+  ;; Check if string str is in list lst
+  (cond
+    ((null lst) nil)
+    ((equal str (car lst)) T)
+    (T (svgo-member-str str (cdr lst)))
+  )
+)
+
 (defun svgo-collect-layers (ss / i ename layers layer)
   ;; Return sorted list of unique layer names from selection set
   (setq layers '())
@@ -741,7 +778,7 @@
   (while (< i (sslength ss))
     (setq ename (ssname ss i))
     (setq layer (svgo-entity-layer ename))
-    (if (not (member layer layers))
+    (if (not (svgo-member-str layer layers))
       (setq layers (append layers (list layer)))
     )
     (setq i (1+ i))
@@ -841,22 +878,23 @@
 ;;; MAIN COMMAND: C:SVGOUT2
 ;;; ============================================================
 
-(defun C:SVGOUT2 ( / *error* old-cmdecho
+(defun C:SVGOUT2 ( / *error* old-err old-cmdecho
                      ss prec stroke-w ignore-col auto-fill
-                     outpath dwgdir
+                     outpath dwgdir outfile
                      vmat svg-w svg-h
                      layers layer-name layer-map
                      bbox i ename edata etype
                      bb-pts p norm elev
-                     elem
+                     layer-elements elem
                      lyr-name lyr-elems
                      vertex-e vdata cx r sa ea
-                     margin-x margin-y vbx vby vbw vbh
+                     margin vbx vby vbw vbh
                      fh vb-prec svg-stroke-w
                      svg-aspect svg-px-w svg-px-h
                      xedges-run last-ent solid-enames new-ss new-full-ss j je jtype
+                     src-layer xe
                      svgo-native-types svgo-acis-types
-                     major-vec ratio)
+                     major-vec ratio total-len step-dist ii wpt)
 
   ;; --- Error handler: restore AutoCAD state on any exit ---
   (defun *error* (msg)
@@ -888,13 +926,13 @@
   (setq old-cmdecho (getvar "CMDECHO"))
   (setq xedges-run nil)
   (setvar "CMDECHO" 0)
-  (vl-load-com)
 
   (princ "\n[SVGOUT2] Select objects to export:")
   (setq ss (ssget))
   (if (null ss)
     (progn
       (princ "\n[SVGOUT2] No objects selected. Exiting.")
+      (setvar "CMDECHO" old-cmdecho)
       (exit)
     )
   )
@@ -914,7 +952,7 @@
   (while (< i (sslength ss))
     (setq ename (ssname ss i))
     (setq etype (cdr (assoc 0 (entget ename))))
-    (if (member etype svgo-acis-types)
+    (if (svgo-member-str etype svgo-acis-types)
       (setq solid-enames (append solid-enames (list ename)))
     )
     (setq i (1+ i))
@@ -926,23 +964,29 @@
       ;; Mark undo state so we can roll back the new edge entities after export
       (vl-cmdf "._UNDO" "Mark")
       (setq xedges-run T)
-      ;; Record the last entity before XEDGES so we can identify new ones
-      (setq last-ent (entlast))
-      ;; Run XEDGES on each solid
-      (foreach sename solid-enames
-        (vl-cmdf "._XEDGES" sename "")
-      )
-      ;; Collect top-level entities added after last-ent by walking the db forward.
-      ;; Skip sub-entity types (VERTEX, SEQEND, ATTRIB, ATTDEF) — these are owned
-      ;; sub-objects of complex entities and must not be added to a selection set directly.
+      ;; Run XEDGES per-solid so we can tag each batch of new edges with the
+      ;; source solid's layer. XEDGES always creates edges on the current active
+      ;; layer — we fix that with entmod immediately after each run.
       (setq new-ss (ssadd))
-      (setq ename (if last-ent (entnext last-ent) (entnext nil)))
-      (while ename
-        (setq etype (cdr (assoc 0 (entget ename))))
-        (if (not (member etype '("VERTEX" "SEQEND" "ATTRIB" "ATTDEF")))
-          (ssadd ename new-ss)
+      (foreach sename solid-enames
+        (setq src-layer (cdr (assoc 8 (entget sename))))
+        (setq last-ent (entlast))
+        (vl-cmdf "._XEDGES" sename "")
+        ;; Collect entities added by this XEDGES call and reassign their layer
+        (setq ename (if last-ent (entnext last-ent) (entnext nil)))
+        (while ename
+          (setq etype (cdr (assoc 0 (entget ename))))
+          (if (not (member etype '("VERTEX" "SEQEND" "ATTRIB" "ATTDEF")))
+            (progn
+              ;; Reassign layer to match source solid
+              (setq xe (entget ename))
+              (setq xe (subst (cons 8 src-layer) (assoc 8 xe) xe))
+              (entmod xe)
+              (ssadd ename new-ss)
+            )
+          )
+          (setq ename (entnext ename))
         )
-        (setq ename (entnext ename))
       )
       (if (> (sslength new-ss) 0)
         (progn
@@ -959,7 +1003,7 @@
           (while (< j (sslength ss))
             (setq je (ssname ss j))
             (setq jtype (cdr (assoc 0 (entget je))))
-            (if (member jtype svgo-native-types)
+            (if (svgo-member-str jtype svgo-native-types)
               (ssadd je new-full-ss)
             )
             (setq j (1+ j))
@@ -998,6 +1042,7 @@
   (if (null outpath)
     (progn
       (princ "\n[SVGOUT2] No output path specified. Exiting.")
+      (setvar "CMDECHO" old-cmdecho)
       (exit)
     )
   )
@@ -1105,9 +1150,27 @@
                  (svgo-ocs-to-wcs (cdr pair) norm 0.0) vmat svg-w svg-h))))))
       )
       ((or (= etype "SPLINE") (= etype "HELIX"))
-       (setq bb-pts (svgo-sample-curve ename 8))
-       (if bb-pts
-         (setq bb-pts (svgo-project-list bb-pts vmat svg-w svg-h))
+       (vl-load-com)
+       (setq total-len
+         (vl-catch-all-apply 'vlax-curve-getDistAtParam
+           (list ename
+             (vl-catch-all-apply 'vlax-curve-getEndParam (list ename)))))
+       (if (vl-catch-all-error-p total-len) (setq total-len nil))
+       (if (and total-len (not (vl-catch-all-error-p total-len)) (> total-len 0.0))
+         (progn
+           (setq step-dist (/ total-len 8.0))
+           (setq ii 0)
+           (while (<= ii 8)
+             (setq wpt
+               (vl-catch-all-apply 'vlax-curve-getPointAtDist
+                 (list ename (* ii step-dist))))
+             (if (and wpt (not (vl-catch-all-error-p wpt)))
+               (setq bb-pts
+                 (append bb-pts
+                   (list (svgo-project-point wpt vmat svg-w svg-h)))))
+             (setq ii (1+ ii))
+           )
+         )
        )
       )
       ((or (= etype "XLINE") (= etype "RAY"))
@@ -1236,5 +1299,5 @@
   (princ)
 )
 
-(princ "\n[SVGOUT2] v42 Loaded. Type SVGOUT2 to run.")
+(princ "\n[SVGOUT2] v43 Loaded. Type SVGOUT2 to run.")
 (princ)
