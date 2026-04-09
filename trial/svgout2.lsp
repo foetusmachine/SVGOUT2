@@ -567,8 +567,8 @@
     ((= etype "POINT")
      (setq pt1 (cdr (assoc 10 edata)))
      (setq proj-pts (svgo-project-list (list pt1) vmat svg-w svg-h))
-     ;; Marker radius: 3x stroke width — stroke-w is already scaled to vbw so this is always visible
-     (setq marker-r (* stroke-w 3.0))
+     ;; Marker radius: same visual weight as a line endpoint
+     (setq marker-r (* stroke-w 0.5))
      (setq svg-str
        (strcat "    <circle"
          " cx=\"" (rtos (car  (car proj-pts)) 2 prec) "\""
@@ -1299,5 +1299,5 @@
   (princ)
 )
 
-(princ "\n[SVGOUT2] v43 Loaded. Type SVGOUT2 to run.")
+(princ "\n[SVGOUT2] v44 Loaded. Type SVGOUT2 to run.")
 (princ)
